@@ -1,0 +1,27 @@
+[package]
+name = "lan_im"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rand = "0.8"
+base64 = "0.21"
+futures = "0.3"
+bytes = "1"
+
+libp2p = { version = "0.52.4", features = [
+    "tcp",           # TCP 传输
+    "tokio",         # 异步运行时
+    "yamux",         # 流多路复用
+    "noise",         # 加密
+    "dns",           # DNS 解析
+    "ping",          # 心跳检测
+    "request-response",  # 请求-响应协议
+    "gossipsub",
+    "mdns",
+    "macros", 
+] }
