@@ -1,5 +1,5 @@
 [package]
-name = "lan_im"
+name = "nodP2p"
 version = "0.1.0"
 edition = "2021"
 
@@ -25,3 +25,4 @@ libp2p = { version = "0.52.4", features = [
     "mdns",
     "macros", 
 ] }
+anyhow = "1.0.102"
