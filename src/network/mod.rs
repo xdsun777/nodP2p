@@ -1,8 +1,8 @@
-pub mod swarm;
 pub mod behaviour;
-pub mod event;
 pub mod command;
-pub mod peer;
-pub mod message;
-pub mod identity;
 pub mod config;
+pub mod event;
+pub mod identity;
+pub mod message;
+pub mod peer;
+pub mod swarm;

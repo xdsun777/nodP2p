@@ -12,5 +12,5 @@ pub enum MessageType {
     Join,
     Chat,
     Leave,
-    FileTransfer
+    FileTransfer,
 }

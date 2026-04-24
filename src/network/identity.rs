@@ -2,12 +2,10 @@ use libp2p::identity;
 use std::{fs, path::Path};
 
 pub fn load_or_generate(path: Option<&Path>) -> identity::Keypair {
-
     if let Some(path) = path {
         if path.exists() {
             let data = fs::read(path).expect("读取密钥失败");
-            return identity::Keypair::from_protobuf_encoding(&data)
-                .expect("解析密钥失败");
+            return identity::Keypair::from_protobuf_encoding(&data).expect("解析密钥失败");
         }
     }
 

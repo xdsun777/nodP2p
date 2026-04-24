@@ -24,6 +24,7 @@ libp2p = { version = "0.52.4", features = [
     "gossipsub",
     "mdns",
     "macros", 
-    "serde"
+    "serde",
+    "json"
 ] }
 anyhow = "1.0.102"

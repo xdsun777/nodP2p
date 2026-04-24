@@ -1,20 +1,15 @@
 use libp2p::{
     futures::StreamExt,
-    gossipsub::{IdentTopic, Event as GossipsubEvent},
-    identity,
-    noise,
+    gossipsub::{Event as GossipsubEvent, IdentTopic},
+    identity, mdns, noise, request_response,
     swarm::SwarmEvent,
-    tcp,
-    yamux,
-    Swarm,
-    SwarmBuilder,
-    mdns,
+    tcp, yamux, Swarm, SwarmBuilder,
 };
 
 use tokio::sync::mpsc;
 
 use crate::network::{
-    behaviour::{NodBehaviour, NodBehaviourEvent},
+    behaviour::{NodBehaviour, NodBehaviourEvent, PrivateMessage},
     command::Command,
     event::AppEvent,
     peer::PeerManager,
@@ -43,10 +38,12 @@ pub async fn start_swarm() -> anyhow::Result<(
         .build();
 
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    let topic = IdentTopic::new("chat");
+    swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
 
     tokio::spawn(async move {
         let mut peers = PeerManager::default();
-        let topic = IdentTopic::new("chat"); // ⭐ 修复：提升到 loop 外
+        let topic = topic.clone();
 
         loop {
             tokio::select! {
@@ -81,7 +78,6 @@ pub async fn start_swarm() -> anyhow::Result<(
                                             AppEvent::PeerDiscovered(peer, addr.clone())
                                         );
 
-                                        // ⭐ 修复：dial 不要 ignore
                                         match swarm.dial(addr.clone()) {
                                             Ok(_) => println!("dial成功: {}", peer),
                                             Err(e) => println!("dial失败: {:?}", e),
@@ -122,7 +118,38 @@ pub async fn start_swarm() -> anyhow::Result<(
                             }
                         }
 
-                        _ => {}
+
+                        // =======================私聊=====================
+                        SwarmEvent::Behaviour(NodBehaviourEvent::Private(event)) => {
+                            match event {
+
+                                request_response::Event::Message { peer, message } => {
+                                    match message {
+
+                                        request_response::Message::Request { request, channel, .. } => {
+
+                                            println!("私聊来自 {}: {}", request.from, request.message);
+
+                                            let _ = event_tx.send(AppEvent::MessageReceived {
+                                                peer,
+                                                message: format!("[私聊] {}", request.message),
+                                            });
+
+                                            // 回复 ACK
+                                            swarm.behaviour_mut()
+                                                .request_response
+                                                .send_response(channel, ())
+                                                .ok();
+                                        }
+
+                                        _ => {}
+                                    }
+                                }
+
+                            _ => {}
+                        }
+                    }
+                    _ => {}
                     }
                 }
 
@@ -135,8 +162,16 @@ pub async fn start_swarm() -> anyhow::Result<(
                                 .publish(topic.clone(), msg.as_bytes());
                         }
 
-                        Command::SendTo { peer, msg } => {
-                            println!("发送给 {}: {}", peer, msg);
+                        Command::Private { peer, message } => {
+                            let req = PrivateMessage  {
+                                from: peer_id.to_string(),
+                                message:message,
+                            };
+
+                            swarm
+                                .behaviour_mut()
+                                .request_response
+                                .send_request(&peer, req);
                         }
                     }
                 }
