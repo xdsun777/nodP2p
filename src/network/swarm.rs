@@ -67,7 +67,7 @@ pub async fn start_swarm(
                 // 网络事件
                 event = swarm.select_next_some() => {
                     match event {
-
+                        // 监听地址
                         SwarmEvent::NewListenAddr { address, .. } => {
                             println!("监听: {}", address);
                         }
