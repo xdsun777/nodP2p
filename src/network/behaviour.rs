@@ -6,7 +6,6 @@ use libp2p::{
 };
 use std::time::Duration;
 
-// 定义行为
 #[derive(NetworkBehaviour)]
 pub struct NodBehaviour {
     pub mdns: mdns::tokio::Behaviour,
@@ -14,22 +13,17 @@ pub struct NodBehaviour {
 }
 
 impl NodBehaviour {
-    // 必须是同步函数
-    pub fn new(key: &identity::Keypair) -> anyhow::Result<Self> {
-
+    pub fn new(key: &identity::Keypair) -> Self {
         let mdns = mdns::tokio::Behaviour::new(
             mdns::Config::default(),
             key.public().to_peer_id(),
-        )?;
+        ).expect("mdns 初始化失败");
 
         let ping = ping::Behaviour::new(
             ping::Config::new()
                 .with_interval(Duration::from_secs(10))
         );
 
-        Ok(Self {
-            mdns,
-            ping,
-        })
+        Self { mdns, ping }
     }
 }
