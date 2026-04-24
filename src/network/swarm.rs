@@ -1,12 +1,6 @@
 use libp2p::{
-    identity,
-    noise,
-    yamux,
-    tcp,
-    Swarm,
-    swarm::{SwarmEvent},
-    SwarmBuilder,
-    futures::StreamExt,
+    futures::StreamExt, gossipsub::IdentTopic, identity, noise, swarm::SwarmEvent, tcp, yamux,
+    Swarm, SwarmBuilder,
 };
 
 use tokio::sync::mpsc;
@@ -18,12 +12,10 @@ use crate::network::{
     peer::PeerManager,
 };
 
-pub async fn start_swarm(
-) -> anyhow::Result<(
+pub async fn start_swarm() -> anyhow::Result<(
     mpsc::UnboundedSender<Command>,
     mpsc::UnboundedReceiver<AppEvent>,
 )> {
-
     // =============================
     // 通道
     // =============================
@@ -41,16 +33,15 @@ pub async fn start_swarm(
     // =============================
     // 构建 Swarm
     // =============================
-    let mut swarm: Swarm<NodBehaviour> =
-        SwarmBuilder::with_existing_identity(keypair)
-            .with_tokio()
-            .with_tcp(
-                tcp::Config::default(),
-                noise::Config::new,
-                yamux::Config::default,
-            )?
-            .with_behaviour(|key| NodBehaviour::new(key))?
-            .build();
+    let mut swarm: Swarm<NodBehaviour> = SwarmBuilder::with_existing_identity(keypair)
+        .with_tokio()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )?
+        .with_behaviour(|key| NodBehaviour::new(key))?
+        .build();
 
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
@@ -58,7 +49,6 @@ pub async fn start_swarm(
     // 启动任务
     // =============================
     tokio::spawn(async move {
-
         let mut peers = PeerManager::default();
 
         loop {
@@ -87,26 +77,40 @@ pub async fn start_swarm(
                                 libp2p::mdns::Event::Discovered(list) => {
                                     for (peer, addr) in list {
                                         swarm.dial(addr.clone()).ok();
-                                        let _ = event_tx.send(
-                                            AppEvent::PeerDiscovered(peer, addr)
-                                        );
+                                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
                                     }
                                 }
                                 _ => {}
                             }
                         }
 
+
+                        SwarmEvent::Behaviour(NodBehaviourEvent::Gossipsub(event)) => {
+                            match event {
+                                libp2p::gossipsub::Event::Message {
+                                propagation_source,
+                                message,
+                                    ..
+                                } => {
+                                    let msg = String::from_utf8_lossy(&message.data);
+
+                                    println!("收到消息 [{}]: {}", propagation_source, msg);
+                                    }
+                            _ => {}
+                            }
+                        }
                         _ => {}
                     }
                 }
 
-                // 命令处理
+                // 3.****************命令处理*******************
                 Some(cmd) = cmd_rx.recv() => {
                     match cmd {
 
                         Command::Broadcast(msg) => {
-                            println!("广播消息: {}", msg);
-                            // TODO: gossipsub
+                            let topic = IdentTopic::new("chat");
+
+                            swarm.behaviour_mut().gossipsub.publish(topic, msg.as_bytes()).unwrap();
                         }
 
                         Command::SendTo { peer, msg } => {
