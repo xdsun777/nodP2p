@@ -1,8 +1,4 @@
-mod network;
-
-use network::swarm::start_swarm;
-use network::command::Command;
-
+use nodp2p::{start_swarm, AppEvent, Command};
 use tokio::io::{self, AsyncBufReadExt};
 
 #[tokio::main]
@@ -15,15 +11,25 @@ async fn main() -> anyhow::Result<()> {
 
     loop {
         tokio::select! {
-
-            // 接收网络事件
             Some(event) = event_rx.recv() => {
-                println!("事件: {:?}", event);
+                match event {
+                    AppEvent::PeerDiscovered(peer, addr) => {
+                        println!("发现节点: {} @ {}", peer, addr);
+                    }
+                    AppEvent::PeerConnected(peer) => {
+                        println!("节点已连接: {}", peer);
+                    }
+                    AppEvent::PeerDisconnected(peer) => {
+                        println!("节点断开: {}", peer);
+                    }
+                    AppEvent::MessageReceived { peer, message } => {
+                        println!("收到消息 [{}]: {}", peer, message);
+                    }
+                }
             }
 
-            // 用户输入
             Ok(Some(line)) = stdin.next_line() => {
-                cmd_tx.send(Command::Broadcast(line)).unwrap();
+                let _ = cmd_tx.send(Command::Broadcast(line));
             }
         }
     }
