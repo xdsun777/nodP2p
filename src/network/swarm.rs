@@ -1,6 +1,14 @@
 use libp2p::{
-    futures::StreamExt, gossipsub::IdentTopic, identity, noise, swarm::SwarmEvent, tcp, yamux,
-    Swarm, SwarmBuilder,
+    futures::StreamExt,
+    gossipsub::{IdentTopic, Event as GossipsubEvent},
+    identity,
+    noise,
+    swarm::SwarmEvent,
+    tcp,
+    yamux,
+    Swarm,
+    SwarmBuilder,
+    mdns,
 };
 
 use tokio::sync::mpsc;
@@ -21,6 +29,7 @@ pub async fn start_swarm() -> anyhow::Result<(
 
     let keypair = identity::Keypair::generate_ed25519();
     let peer_id = keypair.public().to_peer_id();
+
     println!("本节点: {}", peer_id);
 
     let mut swarm: Swarm<NodBehaviour> = SwarmBuilder::with_existing_identity(keypair)
@@ -37,11 +46,14 @@ pub async fn start_swarm() -> anyhow::Result<(
 
     tokio::spawn(async move {
         let mut peers = PeerManager::default();
+        let topic = IdentTopic::new("chat"); // ⭐ 修复：提升到 loop 外
 
         loop {
             tokio::select! {
+
                 event = swarm.select_next_some() => {
                     match event {
+
                         SwarmEvent::NewListenAddr { address, .. } => {
                             println!("监听: {}", address);
                         }
@@ -56,42 +68,75 @@ pub async fn start_swarm() -> anyhow::Result<(
                             let _ = event_tx.send(AppEvent::PeerDisconnected(peer_id));
                         }
 
+                        // ================= MDNS =================
                         SwarmEvent::Behaviour(NodBehaviourEvent::Mdns(event)) => {
-                            if let libp2p::mdns::Event::Discovered(list) = event {
-                                for (peer, addr) in list {
-                                    let _ = event_tx.send(AppEvent::PeerDiscovered(peer, addr.clone()));
-                                    swarm.dial(addr).ok();
-                                    swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
+                            match event {
+
+                                mdns::Event::Discovered(list) => {
+                                    for (peer, addr) in list {
+
+                                        println!("发现节点: {}", peer);
+
+                                        let _ = event_tx.send(
+                                            AppEvent::PeerDiscovered(peer, addr.clone())
+                                        );
+
+                                        // ⭐ 修复：dial 不要 ignore
+                                        match swarm.dial(addr.clone()) {
+                                            Ok(_) => println!("dial成功: {}", peer),
+                                            Err(e) => println!("dial失败: {:?}", e),
+                                        }
+
+                                        swarm.behaviour_mut()
+                                            .gossipsub
+                                            .add_explicit_peer(&peer);
+                                    }
+                                }
+
+                                mdns::Event::Expired(list) => {
+                                    for (peer, _) in list {
+                                        println!("节点过期: {}", peer);
+                                    }
                                 }
                             }
                         }
 
+                        // ================= GOSSIPSUB =================
                         SwarmEvent::Behaviour(NodBehaviourEvent::Gossipsub(event)) => {
-                            if let libp2p::gossipsub::Event::Message {
-                                propagation_source,
-                                message,
-                                ..
-                            } = event {
-                                let msg = String::from_utf8_lossy(&message.data).into_owned();
-                                let _ = event_tx.send(AppEvent::MessageReceived {
-                                    peer: propagation_source,
-                                    message: msg,
-                                });
+                            match event {
+
+                                GossipsubEvent::Message {
+                                    propagation_source,
+                                    message,
+                                    ..
+                                } => {
+                                    let msg = String::from_utf8_lossy(&message.data).into_owned();
+
+                                    let _ = event_tx.send(AppEvent::MessageReceived {
+                                        peer: propagation_source,
+                                        message: msg,
+                                    });
+                                }
+
+                                _ => {}
                             }
                         }
+
                         _ => {}
                     }
                 }
 
                 Some(cmd) = cmd_rx.recv() => {
                     match cmd {
+
                         Command::Broadcast(msg) => {
-                            let topic = IdentTopic::new("chat");
-                            let _ = swarm.behaviour_mut().gossipsub.publish(topic, msg.as_bytes());
+                            let _ = swarm.behaviour_mut()
+                                .gossipsub
+                                .publish(topic.clone(), msg.as_bytes());
                         }
+
                         Command::SendTo { peer, msg } => {
                             println!("发送给 {}: {}", peer, msg);
-                            // TODO: request-response
                         }
                     }
                 }
