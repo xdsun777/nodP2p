@@ -4,3 +4,5 @@ pub mod event;
 pub mod command;
 pub mod peer;
 pub mod message;
+pub mod identity;
+pub mod config;
