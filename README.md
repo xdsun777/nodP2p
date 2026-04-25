@@ -8,44 +8,60 @@
 - 📡 **mDNS 节点发现** - 自动发现局域网内的节点
 - 💬 **消息广播** - 使用 Gossipsub 协议实现可靠的消息广播
 - 🔐 **私聊通信** - 点对点的私密通信
-- 📁 **文件传输** - 支持节点间的文件传输
+- 📁 **文件传输** - 支持节点间的文件传输，数据流可传递给前端
 - 🔑 **密钥管理** - Ed25519 密钥对管理和持久化
+- 🖥️ **前端集成** - 特别适合 Tauri 应用，可将二进制数据传递给前端
 
-## 快速开始
+### 命令行工具
 
-### 添加依赖
+项目包含一个完整的命令行工具，支持以下功能：
 
-```toml
-[dependencies]
-nodp2p = "0.1"
-tokio = { version = "1.0", features = ["full"] }
-libp2p = { version = "0.52", features = ["tcp", "tokio", "yamux", "noise", "gossipsub", "mdns"] }
+```bash
+# 查看帮助
+cargo run -- --help
+
+# 使用默认设置启动
+cargo run
+
+# 指定保存目录和启用详细输出
+cargo run -- --save-dir ./downloads --verbose
+
+# 使用持久化密钥
+cargo run -- --key-file ./my_key.bin
 ```
 
-### 基本用法
+#### 命令行选项
 
-```rust
-use nodp2p::start_swarm;
-use libp2p::identity::Keypair;
+- `-k, --key-file <PATH>`: 密钥文件路径（可选）
+- `-s, --save-dir <DIR>`: 文件保存目录（默认: ./received_files）
+- `-v, --verbose`: 启用详细输出
+- `-L, --listen-addr <ADDR>`: 监听地址（默认: 0.0.0.0）
+- `-P, --listen-port <PORT>`: 监听端口（默认: 0，自动分配）
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // 创建密钥对
-    let key = Keypair::generate_ed25519();
-    
-    // 启动节点
-    let (cmd_tx, mut event_rx) = start_swarm(key).await?;
-    
-    // 发送广播消息
-    cmd_tx.send(nodp2p::Command::Broadcast("Hello P2P".to_string()))?;
-    
-    // 接收事件
-    while let Some(event) = event_rx.recv().await {
-        println!("Event: {:?}", event);
-    }
-    
-    Ok(())
-}
+#### 交互命令
+
+启动后支持以下命令：
+
+- **普通输入**: 广播消息到所有节点
+- **`/s <peer> <msg>`**: 发送私聊消息
+- **`/file <peer> <path>`**: 发送文件
+- **`/list`**: 列出已连接节点
+- **`/save <transfer_id> <filename>`**: 手动保存接收到的文件
+- **`/quit`**: 退出程序
+
+#### 文件自动保存
+
+接收到的文件会自动保存到指定的目录中：
+
+```bash
+📁 文件保存目录: ./received_files
+💾 文件已自动保存: document.pdf -> ./received_files/document.pdf (1024 bytes)
+```
+
+如果自动保存失败，可以使用 `/save` 命令手动保存：
+
+```bash
+/save 1 my_document.pdf
 ```
 
 ## API 概览
@@ -66,6 +82,33 @@ async fn main() -> anyhow::Result<()> {
 - `FileTransferStarted { ... }` - 文件传输开始
 - `FileTransferProgress { ... }` - 文件传输进度
 - `FileReceived { ... }` - 文件接收完成
+
+### 文件传输
+
+文件传输支持两种模式：
+
+#### 实时数据流模式（推荐用于前端集成）
+```rust
+// 接收数据块事件
+AppEvent::FileChunkReceived { transfer_id, offset, data, is_last, .. } => {
+    // 实时处理每个数据块，可传递给前端
+    // 例如在 Tauri 中：window.emit("file-chunk", { transfer_id, offset, data, is_last })
+}
+
+// 接收完整文件
+AppEvent::FileReceived { file_name, data, .. } => {
+    // 获取完整文件数据，可传递给前端存储到 IDB
+    // 例如在 Tauri 中：window.emit("file-received", { file_name, data })
+}
+```
+
+#### 发送文件
+```rust
+cmd_tx.send(Command::SendFile {
+    peer: peer_id,
+    path: PathBuf::from("./document.pdf"),
+})?;
+```
 
 ## 配置
 

@@ -45,6 +45,7 @@ libp2p = { version = "0.52.4", features = [
 ] }
 anyhow = "1.0.102"
 once_cell = "1.21.4"
+clap = { version = "4.0", features = ["derive"] }
 
 [profile.release]
 opt-level = 3

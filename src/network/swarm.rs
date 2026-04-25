@@ -3,9 +3,6 @@ use libp2p::{
     yamux, Swarm, SwarmBuilder,
 };
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use crate::network::{
@@ -19,7 +16,7 @@ struct FileReceiver {
     file_name: String,
     file_size: u64,
     received: u64,
-    file: File,
+    data: Vec<u8>,
     buffer: BTreeMap<u64, Vec<u8>>,
 }
 
@@ -160,40 +157,25 @@ pub async fn start_swarm(
                                                         .send_response(channel, ());
                                                 }
                                                 PrivateMessage::FileRequest { transfer_id, file_name, file_size } => {
-                                                    let save_dir = std::path::Path::new("received_files");
-                                                    if let Err(e) = tokio::fs::create_dir_all(save_dir).await {
-                                                        eprintln!("创建接收目录失败: {:?}", e);
-                                                    }
-                                                    let save_path = save_dir.join(&file_name);
-                                                    match File::create(&save_path).await {
-                                                        Ok(file) => {
-                                                            pending_files.insert(transfer_id, FileReceiver {
-                                                                file_name: file_name.clone(),
-                                                                file_size,
-                                                                received: 0,
-                                                                file,
-                                                                buffer: BTreeMap::new(),
-                                                            });
-                                                            let _ = swarm
-                                                                .behaviour_mut()
-                                                                .request_response
-                                                                .send_response(channel, ());
-                                                            let _ = event_tx.send(
-                                                                AppEvent::FileTransferStarted {
-                                                                    peer,
-                                                                    transfer_id,
-                                                                    file_name,
-                                                                }
-                                                            );
+                                                    // 初始化文件接收器来存储数据块
+                                                    pending_files.insert(transfer_id, FileReceiver {
+                                                        file_name: file_name.clone(),
+                                                        file_size,
+                                                        received: 0,
+                                                        data: Vec::new(),
+                                                        buffer: BTreeMap::new(),
+                                                    });
+                                                    let _ = swarm
+                                                        .behaviour_mut()
+                                                        .request_response
+                                                        .send_response(channel, ());
+                                                    let _ = event_tx.send(
+                                                        AppEvent::FileTransferStarted {
+                                                            peer,
+                                                            transfer_id,
+                                                            file_name,
                                                         }
-                                                        Err(e) => {
-                                                            println!("无法创建文件 {:?}: {}", save_path, e);
-                                                            let _ = swarm
-                                                                .behaviour_mut()
-                                                                .request_response
-                                                                .send_response(channel, ());
-                                                        }
-                                                    }
+                                                    );
                                                 }
                                                 PrivateMessage::FileChunk { transfer_id, offset, data, is_last } => {
                                                     // 立即回复，避免 ResponseOmission
@@ -203,18 +185,23 @@ pub async fn start_swarm(
                                                         .send_response(channel, ());
 
                                                     if let Some(receiver) = pending_files.get_mut(&transfer_id) {
+                                                        // 发送数据块事件给外部处理
+                                                        let _ = event_tx.send(AppEvent::FileChunkReceived {
+                                                            peer,
+                                                            transfer_id,
+                                                            offset,
+                                                            data: data.clone(),
+                                                            is_last,
+                                                        });
+
                                                         if offset == receiver.received {
-                                                            // 顺序写入
-                                                            if let Err(e) = receiver.file.write_all(&data).await {
-                                                                println!("写入文件错误: {}", e);
-                                                            }
+                                                            // 顺序接收数据
+                                                            receiver.data.extend_from_slice(&data);
                                                             receiver.received += data.len() as u64;
 
-                                                            // 写入缓冲区中连续的数据
+                                                            // 处理缓冲区中连续的数据
                                                             while let Some(buffered_data) = receiver.buffer.remove(&receiver.received) {
-                                                                if let Err(e) = receiver.file.write_all(&buffered_data).await {
-                                                                    println!("写入文件错误: {}", e);
-                                                                }
+                                                                receiver.data.extend_from_slice(&buffered_data);
                                                                 receiver.received += buffered_data.len() as u64;
                                                             }
 
@@ -228,17 +215,18 @@ pub async fn start_swarm(
                                                             );
 
                                                             if is_last || receiver.received >= receiver.file_size {
+                                                                // 传输完成，发送完整文件数据
                                                                 let _ = event_tx.send(
                                                                     AppEvent::FileReceived {
                                                                         peer,
                                                                         file_name: receiver.file_name.clone(),
-                                                                        saved_path: PathBuf::from("received_files").join(&receiver.file_name),
+                                                                        data: receiver.data.clone(),
                                                                     }
                                                                 );
                                                                 pending_files.remove(&transfer_id);
                                                             }
                                                         } else if offset > receiver.received {
-                                                            // 超前到达，缓存
+                                                            // 超前到达的数据，缓存起来
                                                             receiver.buffer.insert(offset, data);
                                                         }
                                                         // 重复数据忽略

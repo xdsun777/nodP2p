@@ -53,8 +53,8 @@ async fn main() -> anyhow::Result<()> {
             AppEvent::FileTransferProgress { received, total, .. } => {
                 println!("📊 传输进度: {}/{} bytes", received, total);
             }
-            AppEvent::FileReceived { file_name, saved_path, .. } => {
-                println!("✓ 文件接收完成: {} (保存至 {:?})", file_name, saved_path);
+            AppEvent::FileReceived { file_name, .. } => {
+                println!("✓ 文件接收完成: {} )", file_name);
             }
             _ => {}
         }
