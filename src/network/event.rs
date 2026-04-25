@@ -11,10 +11,4 @@ pub enum AppEvent {
         message: String,
     },
     PrivateText(PeerId, String), // 私聊文字
-    PrivateFile(PeerId, String), // 收到文件
-    PrivateFileBinary {          //二进制文件
-        peer: PeerId,
-        name: String,
-        data: Vec<u8>,
-    },
 }

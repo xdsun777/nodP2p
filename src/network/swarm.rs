@@ -1,8 +1,7 @@
 use libp2p::{
-    futures::StreamExt, gossipsub::IdentTopic, identity, noise, request_response,
-    swarm::SwarmEvent, tcp, yamux, PeerId, Swarm, SwarmBuilder,
+    futures::StreamExt, gossipsub::IdentTopic, noise, request_response, swarm::SwarmEvent, tcp,
+    yamux, PeerId, Swarm, SwarmBuilder,
 };
-use std::path::Path;
 use tokio::sync::mpsc;
 
 use crate::network::{
@@ -21,7 +20,6 @@ pub async fn start_swarm(
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
-    // let keypair = identity::Keypair::generate_ed25519();
     let peer_id = key.public().to_peer_id();
     println!("使用前端密钥启动：{}", peer_id);
 
@@ -40,170 +38,217 @@ pub async fn start_swarm(
 
         loop {
             tokio::select! {
-                            event = swarm.select_next_some() => {
-                                match event {
-                                    // 监听地址
-                                    SwarmEvent::NewListenAddr { address, .. } => {
-                                        println!("监听: {}", address);
-                                    }
 
-                                    // 连接建立
-                                    SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                                        peers.add(peer_id);
-                                        let _ = event_tx.send(AppEvent::PeerConnected(peer_id));
-                                    }
+                // ================= 网络事件 =================
+                event = swarm.select_next_some() => {
+                    match event {
 
-                                    // 断开连接
-                                    SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                                        peers.remove(&peer_id);
-                                        let _ = event_tx.send(AppEvent::PeerDisconnected(peer_id));
-                                    }
+                        // 本地监听地址
+                        SwarmEvent::NewListenAddr { address, .. } => {
+                            println!("监听地址: {}", address);
+                        }
 
-                                    // MDNS 发现
-                                    SwarmEvent::Behaviour(NodBehaviourEvent::Mdns(event)) => {
-                                        if let libp2p::mdns::Event::Discovered(list) = event {
-                                            for (peer, addr) in list {
-                                                let _ = event_tx.send(AppEvent::PeerDiscovered(peer, addr.clone()));
-                                                swarm.dial(addr).ok();
-                                                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
-                                            }
-                                        }
-                                    }
+                        // 建立连接
+                        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                            let is_new = !peers.contains(&peer_id);
 
-                                    // 广播消息
-                                    SwarmEvent::Behaviour(NodBehaviourEvent::Gossipsub(event)) => {
-                                        if let libp2p::gossipsub::Event::Message {
-                                            propagation_source,
-                                            message,
+                            peers.add(peer_id);
+
+                            if is_new {
+                                println!("连接成功: {}", peer_id);
+                                let _ = event_tx.send(AppEvent::PeerConnected(peer_id));
+                            }
+                        }
+
+                        // 连接关闭
+                        SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                            peers.remove(&peer_id);
+
+                            println!("连接断开: {}", peer_id);
+                            let _ = event_tx.send(AppEvent::PeerDisconnected(peer_id));
+                        }
+
+                        // ================= MDNS 自动发现 =================
+                        SwarmEvent::Behaviour(
+                            NodBehaviourEvent::Mdns(
+                                libp2p::mdns::Event::Discovered(list)
+                            )
+                        ) => {
+                            for (peer, addr) in list {
+
+                                // 通知前端发现节点
+                                let _ = event_tx.send(
+                                    AppEvent::PeerDiscovered(peer, addr.clone())
+                                );
+
+                                // 关键修复：
+                                // 已连接节点不再重复 dial
+                                if !peers.contains(&peer) {
+                                    println!("发现新节点，开始连接: {}", peer);
+
+                                    let _ = swarm.dial(addr);
+
+                                    swarm
+                                        .behaviour_mut()
+                                        .gossipsub
+                                        .add_explicit_peer(&peer);
+                                }
+                            }
+                        }
+
+                        // ================= 广播消息 =================
+                        SwarmEvent::Behaviour(
+                            NodBehaviourEvent::Gossipsub(
+                                libp2p::gossipsub::Event::Message {
+                                    propagation_source,
+                                    message,
+                                    ..
+                                }
+                            )
+                        ) => {
+                            let text =
+                                String::from_utf8_lossy(&message.data).to_string();
+
+                            let _ = event_tx.send(
+                                AppEvent::MessageReceived {
+                                    peer: propagation_source,
+                                    message: text,
+                                }
+                            );
+                        }
+
+                        // ================= 私聊消息 =================
+                        SwarmEvent::Behaviour(
+                            NodBehaviourEvent::Private(event)
+                        ) => {
+                            match event {
+
+                                // 收到请求 / 响应
+                                request_response::Event::Message {
+                                    peer,
+                                    message,
+                                } => {
+                                    match message {
+
+                                        // 收到私聊请求
+                                        request_response::Message::Request {
+                                            request,
+                                            channel,
                                             ..
-                                        } = event {
-                                            let msg = String::from_utf8_lossy(&message.data).into_owned();
-                                            let _ = event_tx.send(AppEvent::MessageReceived {
-                                                peer: propagation_source,
-                                                message: msg,
-                                            });
+                                        } => {
+                                            match request {
+                                                PrivateMessage::Text(text) => {
+                                                    println!(
+                                                        "[私聊收到] {}: {}",
+                                                        peer,
+                                                        text
+                                                    );
+
+                                                    let _ = event_tx.send(
+                                                        AppEvent::PrivateText(
+                                                            peer,
+                                                            text,
+                                                        )
+                                                    );
+                                                }
+                                            }
+
+                                            // 回复 ACK
+                                            let _ = swarm
+                                                .behaviour_mut()
+                                                .request_response
+                                                .send_response(channel, ());
+                                        }
+
+                                        // 收到回执
+                                        request_response::Message::Response {
+                                            ..
+                                        } => {
+                                            println!(
+                                                "[私聊发送成功] 对方已确认接收"
+                                            );
                                         }
                                     }
-
-                                    // ===================== 私聊/文件 接收 =====================
-                                    SwarmEvent::Behaviour(NodBehaviourEvent::Private(event)) => {
-                match event {
-                    // 正确：Message 统一匹配，内部再分 Request / Response
-                    request_response::Event::Message { peer, message } => {
-                        match message {
-                            // 1. 处理请求
-                            request_response::Message::Request { request, channel,.. } => {
-                                match request {
-                                    PrivateMessage::Text(text) => {
-                                        println!("[私聊] {}: {}", peer, text);
-                                        let _ = event_tx.send(AppEvent::PrivateText(peer, text));
-                                    }
-
-                                    PrivateMessage::File { name, data } => {
-                                        println!("[DEBUG] 成功收到 File 消息：{}", name);
-                                        let save_path = std::env::current_dir().unwrap_or_default().join(&name);
-                                        if let Err(e) = tokio::fs::write(&save_path, &data).await {
-                                            println!("[写入失败] {}: {}", name, e);
-                                        } else {
-                                            println!("[写入成功] {}", name);
-                                        }
-                                        let _ = event_tx.send(AppEvent::PrivateFile(peer, name));
-                                    }
-
-                                    PrivateMessage::BinaryFile { name, data } => {
-                                        println!("[收二进制文件] {} -> {}", peer, name);
-                                        let _ = event_tx.send(AppEvent::PrivateFileBinary { peer, name, data });
-                                    }
                                 }
-                                // 必须回复
-                                let _ = swarm.behaviour_mut().request_response.send_response(channel, ());
-                            }
 
-                            // 2. 处理响应（和 Request 同级）
-                            request_response::Message::Response { .. } => {
-                                println!("[DEBUG] 文件发送成功，收到对方回执");
-                            }
-                        }
-                    }
-
-                    // 错误处理
-                    request_response::Event::OutboundFailure { error, .. } => {
-                        println!("[发送失败]: {:?}", error);
-                    }
-                    request_response::Event::InboundFailure { error, .. } => {
-                        println!("[接收失败]: {:?}", error);
-                    }
-                    _ => {}
-                }
-            }
-
-
-
-
-
-
-
-                                    _ => {}
+                                request_response::Event::OutboundFailure {
+                                    peer,
+                                    error,
+                                    ..
+                                } => {
+                                    println!(
+                                        "[发送失败] {} {:?}",
+                                        peer,
+                                        error
+                                    );
                                 }
-                            }
 
-                            // 命令处理
-                            Some(cmd) = cmd_rx.recv() => {
-                                match cmd {
-                                    // 广播
-                                    Command::Broadcast(msg) => {
-                                        let topic = IdentTopic::new("chat");
-                                        let _ = swarm.behaviour_mut().gossipsub.publish(topic, msg.as_bytes());
-                                    }
+                                request_response::Event::InboundFailure {
+                                    peer,
+                                    error,
+                                    ..
+                                } => {
+                                    println!(
+                                        "[接收失败] {} {:?}",
+                                        peer,
+                                        error
+                                    );
+                                }
 
-                                    // 私聊发文字
-                                    Command::SendPrivateText { peer, text } => {
-                                        let msg = PrivateMessage::Text(text);
-                                        swarm.behaviour_mut().request_response.send_request(&peer, msg);
-                                    }
-
-                                    // 私聊发文件
-                                    Command::SendPrivateFile { peer, path } => {
-                println!("尝试读取文件: {}", path);
-                match tokio::fs::read(&path).await {
-                    Ok(data) => {
-                        let name = Path::new(&path)
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned();
-
-                        println!("✅ 读取文件成功: {} ({} 字节)", path, data.len());
-                        println!("📛 发送文件名: {}", name);
-
-                        // ✅ 修复：克隆 data
-                        let msg = PrivateMessage::File {
-                            name,
-                            data: data.clone(),
-                        };
-
-                        swarm.behaviour_mut().request_response.send_request(&peer, msg);
-                        println!("✅ 文件已发送至: {}", peer);
-                    }
-                    Err(e) => {
-                        println!("❌ 读取文件失败: {} -> 错误: {}", path, e);
-                    }
-                }
-            }
-
-                                    // 二进制文件发送命令
-                                    Command::SendPrivateBinary { peer, name, data } => {
-                                        let msg = PrivateMessage::BinaryFile { name, data };
-                                        swarm.behaviour_mut().request_response.send_request(&peer, msg);
-                                        println!("二进制文件发送成功");
-                                    }
-
-
-
-                                    _ => {}
+                                request_response::Event::ResponseSent {
+                                    peer,
+                                    ..
+                                } => {
+                                    println!(
+                                        "[已回复 ACK] {}",
+                                        peer
+                                    );
                                 }
                             }
                         }
+
+                        _ => {}
+                    }
+                }
+
+                // ================= 命令处理 =================
+                Some(cmd) = cmd_rx.recv() => {
+                    match cmd {
+
+                        // 广播消息
+                        Command::Broadcast(text) => {
+                            let topic = IdentTopic::new("chat");
+
+                            let _ = swarm
+                                .behaviour_mut()
+                                .gossipsub
+                                .publish(topic, text.as_bytes());
+                        }
+
+                        // 私聊文字
+                        Command::SendPrivateText { peer, text } => {
+
+                            // 防止发给离线节点
+                            if !peers.contains(&peer) {
+                                println!("目标节点未连接: {}", peer);
+                                continue;
+                            }
+
+                            println!("发送私聊 -> {}", peer);
+
+                            swarm
+                                .behaviour_mut()
+                                .request_response
+                                .send_request(
+                                    &peer,
+                                    PrivateMessage::Text(text),
+                                );
+                        }
+
+                        _ => {}
+                    }
+                }
+            }
         }
     });
 

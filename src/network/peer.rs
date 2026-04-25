@@ -18,4 +18,8 @@ impl PeerManager {
     pub fn all(&self) -> Vec<PeerId> {
         self.peers.iter().cloned().collect()
     }
+
+    pub fn contains(&self, peer: &PeerId) -> bool {
+        self.peers.contains(peer)
+    }
 }

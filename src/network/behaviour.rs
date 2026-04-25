@@ -11,14 +11,7 @@ use std::iter::once;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PrivateMessage {
     Text(String),
-    File {
-        name: String,
-        data: Vec<u8>,
-    },
-    BinaryFile {
-        name: String,
-        data: Vec<u8>,
-    },
+    
 }
 
 // 事件枚举
