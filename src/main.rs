@@ -10,14 +10,13 @@ async fn main() -> anyhow::Result<()> {
     println!("--------------------------------");
     println!("普通输入              = 群发消息");
     println!("/s <peer> <msg>       = 私聊消息");
-
+    println!("/file <peer> <path>   = 发送文件");
     println!("--------------------------------");
 
     let mut stdin = io::BufReader::new(io::stdin()).lines();
 
     loop {
         tokio::select! {
-            // 网络事件
             Some(event) = event_rx.recv() => {
                 match event {
                     AppEvent::PeerDiscovered(peer, addr) => {
@@ -33,13 +32,27 @@ async fn main() -> anyhow::Result<()> {
                         println!("广播消息 [{}]: {}", peer, message);
                     }
                     AppEvent::PrivateText(peer, text) => {
-                        println!("main：[私聊] {}: {}", peer, text);
+                        println!("[私聊] {}: {}", peer, text);
                     }
-
+                    AppEvent::FileRequestReceived { peer, file_name, file_size, .. } => {
+                        println!("📥 收到文件请求: {} ({} bytes) 来自 {}", file_name, file_size, peer);
+                    }
+                    AppEvent::FileTransferStarted { peer, file_name, .. } => {
+                        println!("📁 文件传输开始: {} -> {}", peer, file_name);
+                    }
+                    AppEvent::FileTransferProgress { transfer_id, peer, received, total } => {
+                        println!("📶 传输进度 [{}] {}: {}/{}", transfer_id, peer, received, total);
+                    }
+                    AppEvent::FileReceived { peer, file_name, saved_path } => {
+                        println!("✅ 文件接收完成: {} 保存至 {:?}", file_name, saved_path);
+                    }
+                    AppEvent::FileSent { peer, transfer_id } => {
+                        println!("✅ 文件发送完成: transfer_id={}", transfer_id);
+                    }
+                    _ => {}
                 }
             }
 
-            // 用户输入
             Ok(Some(line)) = stdin.next_line() => {
                 handle_input(line, &cmd_tx);
             }
@@ -47,18 +60,15 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-// 处理输入命令
 fn handle_input(line: String, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
     let line = line.trim();
     if line.is_empty() {
         return;
     }
 
-    // -------------------- 私聊命令 --------------------
     if line.starts_with("/s ") {
         let mut parts = line.splitn(3, ' ');
         parts.next();
-
         let peer_str = match parts.next() {
             Some(p) => p,
             None => {
@@ -66,7 +76,6 @@ fn handle_input(line: String, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Comman
                 return;
             }
         };
-
         let text = match parts.next() {
             Some(t) => t,
             None => {
@@ -74,7 +83,6 @@ fn handle_input(line: String, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Comman
                 return;
             }
         };
-
         match peer_str.parse::<PeerId>() {
             Ok(peer_id) => {
                 cmd_tx.send(Command::SendPrivateText {
@@ -88,8 +96,34 @@ fn handle_input(line: String, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Comman
         return;
     }
 
-    
+    if line.starts_with("/file ") {
+        let mut parts = line.splitn(3, ' ');
+        parts.next();
+        let peer_str = match parts.next() {
+            Some(p) => p,
+            None => {
+                println!("用法: /file <peer_id> <文件路径>");
+                return;
+            }
+        };
+        let file_path = match parts.next() {
+            Some(p) => p,
+            None => {
+                println!("用法: /file <peer_id> <文件路径>");
+                return;
+            }
+        };
+        match peer_str.parse::<PeerId>() {
+            Ok(peer_id) => {
+                let path = std::path::PathBuf::from(file_path);
+                cmd_tx.send(Command::SendFile { peer: peer_id, path }).unwrap();
+                println!("📁 开始发送文件 -> {}: {}", peer_id, file_path);
+            }
+            Err(_) => println!("❌ PeerId 格式错误"),
+        }
+        return;
+    }
 
-    // -------------------- 广播消息 --------------------
+    // 默认广播消息
     cmd_tx.send(Command::Broadcast(line.to_string())).unwrap();
 }

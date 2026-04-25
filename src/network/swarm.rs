@@ -2,6 +2,10 @@ use libp2p::{
     futures::StreamExt, gossipsub::IdentTopic, noise, request_response, swarm::SwarmEvent, tcp,
     yamux, PeerId, Swarm, SwarmBuilder,
 };
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use crate::network::{
@@ -10,6 +14,17 @@ use crate::network::{
     event::AppEvent,
     peer::PeerManager,
 };
+
+struct FileReceiver {
+    file_name: String,
+    file_size: u64,
+    received: u64,
+    file: File,
+    buffer: BTreeMap<u64, Vec<u8>>,
+}
+
+/// 启动 P2P 网络节点
+///
 
 pub async fn start_swarm(
     key: libp2p::identity::Keypair,
@@ -33,70 +48,49 @@ pub async fn start_swarm(
 
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
+    let cmd_tx_clone = cmd_tx.clone();
     tokio::spawn(async move {
         let mut peers = PeerManager::default();
+        let mut pending_files: HashMap<u64, FileReceiver> = HashMap::new();
+        let mut next_transfer_id: u64 = 0;
 
         loop {
             tokio::select! {
-
                 // ================= 网络事件 =================
                 event = swarm.select_next_some() => {
                     match event {
-
-                        // 本地监听地址
                         SwarmEvent::NewListenAddr { address, .. } => {
                             println!("监听地址: {}", address);
                         }
-
-                        // 建立连接
                         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                             let is_new = !peers.contains(&peer_id);
-
                             peers.add(peer_id);
-
                             if is_new {
                                 println!("连接成功: {}", peer_id);
                                 let _ = event_tx.send(AppEvent::PeerConnected(peer_id));
                             }
                         }
-
-                        // 连接关闭
                         SwarmEvent::ConnectionClosed { peer_id, .. } => {
                             peers.remove(&peer_id);
-
                             println!("连接断开: {}", peer_id);
                             let _ = event_tx.send(AppEvent::PeerDisconnected(peer_id));
                         }
-
-                        // ================= MDNS 自动发现 =================
                         SwarmEvent::Behaviour(
                             NodBehaviourEvent::Mdns(
                                 libp2p::mdns::Event::Discovered(list)
                             )
                         ) => {
                             for (peer, addr) in list {
-
-                                // 通知前端发现节点
                                 let _ = event_tx.send(
                                     AppEvent::PeerDiscovered(peer, addr.clone())
                                 );
-
-                                // 关键修复：
-                                // 已连接节点不再重复 dial
                                 if !peers.contains(&peer) {
                                     println!("发现新节点，开始连接: {}", peer);
-
                                     let _ = swarm.dial(addr);
-
-                                    swarm
-                                        .behaviour_mut()
-                                        .gossipsub
-                                        .add_explicit_peer(&peer);
+                                    swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
                                 }
                             }
                         }
-
-                        // ================= 广播消息 =================
                         SwarmEvent::Behaviour(
                             NodBehaviourEvent::Gossipsub(
                                 libp2p::gossipsub::Event::Message {
@@ -106,9 +100,7 @@ pub async fn start_swarm(
                                 }
                             )
                         ) => {
-                            let text =
-                                String::from_utf8_lossy(&message.data).to_string();
-
+                            let text = String::from_utf8_lossy(&message.data).to_string();
                             let _ = event_tx.send(
                                 AppEvent::MessageReceived {
                                     peer: propagation_source,
@@ -116,97 +108,136 @@ pub async fn start_swarm(
                                 }
                             );
                         }
-
-                        // ================= 私聊消息 =================
                         SwarmEvent::Behaviour(
                             NodBehaviourEvent::Private(event)
                         ) => {
                             match event {
-
-                                // 收到请求 / 响应
-                                request_response::Event::Message {
-                                    peer,
-                                    message,
-                                } => {
+                                request_response::Event::Message { peer, message } => {
                                     match message {
-
-                                        // 收到私聊请求
-                                        request_response::Message::Request {
-                                            request,
-                                            channel,
-                                            ..
-                                        } => {
+                                        request_response::Message::Request { request, channel, .. } => {
                                             match request {
                                                 PrivateMessage::Text(text) => {
-                                                    println!(
-                                                        "[私聊收到] {}: {}",
-                                                        peer,
-                                                        text
-                                                    );
-
+                                                    println!("[私聊收到] {}: {}", peer, text);
                                                     let _ = event_tx.send(
-                                                        AppEvent::PrivateText(
-                                                            peer,
-                                                            text,
-                                                        )
+                                                        AppEvent::PrivateText(peer, text)
                                                     );
+                                                    let _ = swarm
+                                                        .behaviour_mut()
+                                                        .request_response
+                                                        .send_response(channel, ());
+                                                }
+                                                PrivateMessage::FileRequest { transfer_id, file_name, file_size } => {
+                                                    let save_dir = std::path::Path::new("received_files");
+                                                    if let Err(e) = tokio::fs::create_dir_all(save_dir).await {
+                                                        eprintln!("创建接收目录失败: {:?}", e);
+                                                    }
+                                                    let save_path = save_dir.join(&file_name);
+                                                    match File::create(&save_path).await {
+                                                        Ok(file) => {
+                                                            pending_files.insert(transfer_id, FileReceiver {
+                                                                file_name: file_name.clone(),
+                                                                file_size,
+                                                                received: 0,
+                                                                file,
+                                                                buffer: BTreeMap::new(),
+                                                            });
+                                                            let _ = swarm
+                                                                .behaviour_mut()
+                                                                .request_response
+                                                                .send_response(channel, ());
+                                                            let _ = event_tx.send(
+                                                                AppEvent::FileTransferStarted {
+                                                                    peer,
+                                                                    transfer_id,
+                                                                    file_name,
+                                                                }
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            println!("无法创建文件 {:?}: {}", save_path, e);
+                                                            let _ = swarm
+                                                                .behaviour_mut()
+                                                                .request_response
+                                                                .send_response(channel, ());
+                                                        }
+                                                    }
+                                                }
+                                                PrivateMessage::FileChunk { transfer_id, offset, data, is_last } => {
+                                                    // 立即回复，避免 ResponseOmission
+                                                    let _ = swarm
+                                                        .behaviour_mut()
+                                                        .request_response
+                                                        .send_response(channel, ());
+
+                                                    if let Some(receiver) = pending_files.get_mut(&transfer_id) {
+                                                        if offset == receiver.received {
+                                                            // 顺序写入
+                                                            if let Err(e) = receiver.file.write_all(&data).await {
+                                                                println!("写入文件错误: {}", e);
+                                                            }
+                                                            receiver.received += data.len() as u64;
+
+                                                            // 写入缓冲区中连续的数据
+                                                            while let Some(buffered_data) = receiver.buffer.remove(&receiver.received) {
+                                                                if let Err(e) = receiver.file.write_all(&buffered_data).await {
+                                                                    println!("写入文件错误: {}", e);
+                                                                }
+                                                                receiver.received += buffered_data.len() as u64;
+                                                            }
+
+                                                            let _ = event_tx.send(
+                                                                AppEvent::FileTransferProgress {
+                                                                    peer,
+                                                                    transfer_id,
+                                                                    received: receiver.received,
+                                                                    total: receiver.file_size,
+                                                                }
+                                                            );
+
+                                                            if is_last || receiver.received >= receiver.file_size {
+                                                                let _ = event_tx.send(
+                                                                    AppEvent::FileReceived {
+                                                                        peer,
+                                                                        file_name: receiver.file_name.clone(),
+                                                                        saved_path: PathBuf::from("received_files").join(&receiver.file_name),
+                                                                    }
+                                                                );
+                                                                pending_files.remove(&transfer_id);
+                                                            }
+                                                        } else if offset > receiver.received {
+                                                            // 超前到达，缓存
+                                                            receiver.buffer.insert(offset, data);
+                                                        }
+                                                        // 重复数据忽略
+                                                    } else {
+                                                        println!("未识别的 transfer_id: {}", transfer_id);
+                                                    }
+                                                }
+                                                PrivateMessage::FileAccept { transfer_id } => {
+                                                    println!("对方接受文件传输: transfer_id={}", transfer_id);
+                                                }
+                                                PrivateMessage::FileDeny { transfer_id } => {
+                                                    println!("对方拒绝文件传输: transfer_id={}", transfer_id);
+                                                    active_sends.remove(&transfer_id);
                                                 }
                                             }
-
-                                            // 回复 ACK
-                                            let _ = swarm
-                                                .behaviour_mut()
-                                                .request_response
-                                                .send_response(channel, ());
                                         }
-
-                                        // 收到回执
-                                        request_response::Message::Response {
-                                            ..
-                                        } => {
-                                            println!(
-                                                "[私聊发送成功] 对方已确认接收"
-                                            );
+                                        request_response::Message::Response { .. } => {
+                                            println!("[私聊发送成功] 对方已确认接收");
                                         }
                                     }
                                 }
-
-                                request_response::Event::OutboundFailure {
-                                    peer,
-                                    error,
-                                    ..
-                                } => {
-                                    println!(
-                                        "[发送失败] {} {:?}",
-                                        peer,
-                                        error
-                                    );
+                                request_response::Event::OutboundFailure { peer, error, .. } => {
+                                    println!("[发送失败] {} {:?}", peer, error);
                                 }
-
-                                request_response::Event::InboundFailure {
-                                    peer,
-                                    error,
-                                    ..
-                                } => {
-                                    println!(
-                                        "[接收失败] {} {:?}",
-                                        peer,
-                                        error
-                                    );
+                                request_response::Event::InboundFailure { peer, error, .. } => {
+                                    println!("[接收失败] {} {:?}", peer, error);
                                 }
-
-                                request_response::Event::ResponseSent {
-                                    peer,
-                                    ..
-                                } => {
-                                    println!(
-                                        "[已回复 ACK] {}",
-                                        peer
-                                    );
+                                request_response::Event::ResponseSent { peer, .. } => {
+                                    println!("[已回复 ACK] {}", peer);
                                 }
                             }
                         }
-
                         _ => {}
                     }
                 }
@@ -214,38 +245,113 @@ pub async fn start_swarm(
                 // ================= 命令处理 =================
                 Some(cmd) = cmd_rx.recv() => {
                     match cmd {
-
-                        // 广播消息
                         Command::Broadcast(text) => {
                             let topic = IdentTopic::new("chat");
-
                             let _ = swarm
                                 .behaviour_mut()
                                 .gossipsub
                                 .publish(topic, text.as_bytes());
                         }
-
-                        // 私聊文字
                         Command::SendPrivateText { peer, text } => {
-
-                            // 防止发给离线节点
+                            if !peers.contains(&peer) {
+                                println!("目标节点未连接: {}", peer);
+                                continue;
+                            }
+                            println!("发送私聊 -> {}", peer);
+                            swarm
+                                .behaviour_mut()
+                                .request_response
+                                .send_request(&peer, PrivateMessage::Text(text));
+                        }
+                        Command::SendFile { peer, path } => {
                             if !peers.contains(&peer) {
                                 println!("目标节点未连接: {}", peer);
                                 continue;
                             }
 
-                            println!("发送私聊 -> {}", peer);
+                            let transfer_id = next_transfer_id;
+                            next_transfer_id += 1;
 
+                            match tokio::fs::metadata(&path).await {
+                                Ok(meta) => {
+                                    let file_size = meta.len();
+                                    let file_name = path
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_string();
+
+                                    // 发送文件请求
+                                    let req = PrivateMessage::FileRequest {
+                                        transfer_id,
+                                        file_name: file_name.clone(),
+                                        file_size,
+                                    };
+                                    swarm.behaviour_mut().request_response.send_request(&peer, req);
+                                    let _ = event_tx.send(AppEvent::FileTransferStarted {
+                                        peer,
+                                        transfer_id,
+                                        file_name: file_name.clone(),
+                                    });
+
+                                    // 使用 cmd_tx_clone 来避免移动问题
+                                    let tx = cmd_tx_clone.clone();
+                                    tokio::spawn(async move {
+                                        match tokio::fs::File::open(&path).await {
+                                            Ok(mut file) => {
+                                                use tokio::io::AsyncReadExt;
+                                                let mut offset: u64 = 0;
+                                                let chunk_size: usize = 256 * 1024;
+                                                loop {
+                                                    let mut buf = vec![0u8; chunk_size];
+                                                    match file.read(&mut buf).await {
+                                                        Ok(0) => break,
+                                                        Ok(n) => {
+                                                            buf.truncate(n);
+                                                            let is_last = offset + n as u64 >= file_size;
+                                                            let _ = tx.send(Command::SendFileChunk {
+                                                                transfer_id,
+                                                                peer,
+                                                                offset,
+                                                                data: buf,
+                                                                is_last,
+                                                            });
+                                                            offset += n as u64;
+                                                            if is_last {
+                                                                break;
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            eprintln!("读取文件错误: {}", e);
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => eprintln!("无法打开文件: {}", e),
+                                        }
+                                    });
+                                }
+                                Err(e) => println!("无法读取文件: {}", e),
+                            }
+                        }
+                        Command::SendFileChunk { transfer_id, peer, offset, data, is_last } => {
+                            if !peers.contains(&peer) {
+                                println!("目标节点已断开，无法发送数据块");
+                                continue;
+                            }
+                            let msg = PrivateMessage::FileChunk {
+                                transfer_id,
+                                offset,
+                                data,
+                                is_last,
+                            };
                             swarm
                                 .behaviour_mut()
                                 .request_response
-                                .send_request(
-                                    &peer,
-                                    PrivateMessage::Text(text),
-                                );
+                                .send_request(&peer, msg);
                         }
-
-                        _ => {}
+                        // 所有变体都已列出，无需 _ 兜底
                     }
                 }
             }

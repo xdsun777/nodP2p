@@ -11,7 +11,10 @@ use std::iter::once;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PrivateMessage {
     Text(String),
-    
+    FileRequest { transfer_id: u64, file_name: String, file_size: u64 },
+    FileAccept { transfer_id: u64 },
+    FileDeny { transfer_id: u64 },
+    FileChunk { transfer_id: u64, offset: u64, data: Vec<u8>, is_last: bool },
 }
 
 // 事件枚举
