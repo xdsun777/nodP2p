@@ -25,6 +25,8 @@ libp2p = { version = "0.52.4", features = [
     "mdns",
     "macros", 
     "serde",
-    "json"
+    "json",
+    "kad"
 ] }
 anyhow = "1.0.102"
+once_cell = "1.21.4"

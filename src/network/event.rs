@@ -1,10 +1,20 @@
 use libp2p::{Multiaddr, PeerId};
 use serde::Serialize;
 
-#[derive(Debug, Serialize)] // 加上 Serialize
+#[derive(Debug, Serialize)]
 pub enum AppEvent {
-    PeerDiscovered(PeerId, Multiaddr),
     PeerConnected(PeerId),
     PeerDisconnected(PeerId),
-    MessageReceived { peer: PeerId, message: String },
+    PeerDiscovered(PeerId, Multiaddr),
+    MessageReceived {
+        peer: PeerId,
+        message: String,
+    },
+    PrivateText(PeerId, String), // 私聊文字
+    PrivateFile(PeerId, String), // 收到文件
+    PrivateFileBinary {          //二进制文件
+        peer: PeerId,
+        name: String,
+        data: Vec<u8>,
+    },
 }
