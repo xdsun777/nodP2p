@@ -2,6 +2,21 @@
 name = "nodp2p"
 version = "0.1.0"
 edition = "2021"
+authors = ["Developer"]
+description = "A high-performance P2P network library based on libp2p with support for message broadcasting, private messaging, and file transfer"
+readme = "README.md"
+repository = "https://github.com/yourusername/nodp2p"
+license = "MIT"
+keywords = ["p2p", "network", "libp2p", "async", "distributed"]
+categories = ["network-programming", "distributed-systems"]
+
+[lib]
+name = "nodp2p"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nodp2p"
+path = "src/main.rs"
 
 [dependencies]
 thiserror = "1.0"
@@ -14,15 +29,15 @@ futures = "0.3"
 bytes = "1"
 
 libp2p = { version = "0.52.4", features = [
-    "tcp",           # TCP 传输
-    "tokio",         # 异步运行时
-    "yamux",         # 流多路复用
-    "noise",         # 加密
-    "dns",           # DNS 解析
-    "ping",          # 心跳检测
+    "tcp",               # TCP 传输
+    "tokio",             # 异步运行时
+    "yamux",             # 流多路复用
+    "noise",             # 加密
+    "dns",               # DNS 解析
+    "ping",              # 心跳检测
     "request-response",  # 请求-响应协议
-    "gossipsub",
-    "mdns",
+    "gossipsub",         # 消息广播
+    "mdns",              # mDNS 发现
     "macros", 
     "serde",
     "json",
@@ -30,3 +45,12 @@ libp2p = { version = "0.52.4", features = [
 ] }
 anyhow = "1.0.102"
 once_cell = "1.21.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0

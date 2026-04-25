@@ -9,7 +9,9 @@ use base64::Engine;
 ///
 /// # Example
 /// ```no_run
-/// let keypair = nodp2p::network::identity::load_or_generate(Some(Path::new("keypair.bin")));
+/// # use std::path::Path;
+/// # use nodp2p::network::identity::load_or_generate;
+/// let keypair = load_or_generate(Some(Path::new("keypair.bin")));
 /// ```
 pub fn load_or_generate(path: Option<&Path>) -> identity::Keypair {
     if let Some(path) = path {
@@ -40,7 +42,8 @@ pub fn load_or_generate(path: Option<&Path>) -> identity::Keypair {
 ///
 /// # Example
 /// ```ignore
-/// let (peer_id, key_base64) = nodp2p::network::identity::create_key()?;
+/// # use nodp2p::network::identity::create_key;
+/// let (peer_id, key_base64) = create_key()?;
 /// println!("Peer ID: {}", peer_id);
 /// ```
 pub fn create_key() -> Result<(String, String), String> {
@@ -66,7 +69,8 @@ pub fn create_key() -> Result<(String, String), String> {
 ///
 /// # Example
 /// ```ignore
-/// let keypair = nodp2p::network::identity::de_key(key_base64);
+/// # use nodp2p::network::identity::de_key;
+/// let keypair = de_key(key_base64);
 /// ```
 pub fn de_key(key_base64: String) -> identity::Keypair {
     let key_bytes = base64::engine::general_purpose::STANDARD

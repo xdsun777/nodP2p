@@ -43,13 +43,12 @@ async fn main() -> anyhow::Result<()> {
                     AppEvent::FileTransferProgress { transfer_id, peer, received, total } => {
                         println!("📶 传输进度 [{}] {}: {}/{}", transfer_id, peer, received, total);
                     }
-                    AppEvent::FileReceived { peer, file_name, saved_path } => {
+                    AppEvent::FileReceived { peer: _, file_name, saved_path } => {
                         println!("✅ 文件接收完成: {} 保存至 {:?}", file_name, saved_path);
                     }
-                    AppEvent::FileSent { peer, transfer_id } => {
+                    AppEvent::FileSent { peer: _, transfer_id } => {
                         println!("✅ 文件发送完成: transfer_id={}", transfer_id);
                     }
-                    _ => {}
                 }
             }
 

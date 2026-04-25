@@ -1,6 +1,6 @@
 use libp2p::{
     futures::StreamExt, gossipsub::IdentTopic, noise, request_response, swarm::SwarmEvent, tcp,
-    yamux, PeerId, Swarm, SwarmBuilder,
+    yamux, Swarm, SwarmBuilder,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -25,6 +25,39 @@ struct FileReceiver {
 
 /// 启动 P2P 网络节点
 ///
+/// 初始化一个完整的 libp2p 网络节点，包括 TCP 传输、mDNS 发现、Gossipsub 消息广播
+/// 和点对点私聊功能。该函数返回一个命令发送通道和事件接收通道。
+///
+/// # Arguments
+/// * `key` - Ed25519 密钥对，用于节点身份标识
+///
+/// # Returns
+/// 返回 `(cmd_tx, event_rx)` 元组：
+/// - `cmd_tx`: 用于发送命令的无界通道发送器（广播、私聊、文件传输）
+/// - `event_rx`: 用于接收网络事件的无界通道接收器
+///
+/// # Errors
+/// 当监听地址解析失败或网络初始化失败时返回错误
+///
+/// # Example
+/// ```no_run
+/// # use nodp2p::start_swarm;
+/// # use libp2p::identity::Keypair;
+/// # #[tokio::main]
+/// # async fn main() -> anyhow::Result<()> {
+/// let key = Keypair::generate_ed25519();
+/// let (cmd_tx, mut event_rx) = start_swarm(key).await?;
+///
+/// // 发送消息
+/// cmd_tx.send(nodp2p::Command::Broadcast("Hello".to_string()))?;
+///
+/// // 接收事件
+/// if let Some(event) = event_rx.recv().await {
+///     // 处理事件
+/// }
+/// # Ok(())
+/// # }
+/// ```
 
 pub async fn start_swarm(
     key: libp2p::identity::Keypair,
@@ -218,7 +251,6 @@ pub async fn start_swarm(
                                                 }
                                                 PrivateMessage::FileDeny { transfer_id } => {
                                                     println!("对方拒绝文件传输: transfer_id={}", transfer_id);
-                                                    active_sends.remove(&transfer_id);
                                                 }
                                             }
                                         }
