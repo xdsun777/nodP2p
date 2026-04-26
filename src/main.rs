@@ -1,9 +1,9 @@
 use clap::Parser;
 use nodp2p::{start_swarm, AppEvent, Command};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::fs;
-use tokio::io::{self, AsyncBufReadExt};
+use tokio::io::{self, AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt};
 use libp2p::PeerId;
 
 /// P2P 网络节点命令行工具
@@ -69,12 +69,20 @@ async fn main() -> anyhow::Result<()> {
     println!("/s <peer> <msg>       = 私聊消息");
     println!("/file <peer> <path>   = 发送文件");
     println!("/list                 = 列出已连接节点");
-    println!("/save <transfer_id> <filename> = 手动保存文件");
     println!("/quit                 = 退出程序");
     println!("--------------------------------");
 
     let mut stdin = io::BufReader::new(io::stdin()).lines();
-    let mut received_files: HashMap<u64, (String, Vec<u8>)> = HashMap::new();
+    let mut incoming_files: HashMap<(PeerId, u64), IncomingFile> = HashMap::new();
+    let mut next_transfer_id: u64 = 0;
+
+    struct IncomingFile {
+        file: tokio::fs::File,
+        temp_path: PathBuf,
+        final_path: PathBuf,
+        original_file_name: String,
+        total_size: u64,
+    }
 
     loop {
         tokio::select! {
@@ -97,10 +105,38 @@ async fn main() -> anyhow::Result<()> {
                     AppEvent::PrivateText(peer, text) => {
                         println!("🔒 [私聊] {}: {}", peer, text);
                     }
-                    AppEvent::FileRequestReceived { peer, file_name, file_size, transfer_id: _ } => {
+                    AppEvent::FileRequestReceived { peer, file_name, file_size, transfer_id } => {
                         println!("📥 收到文件请求: {} ({} bytes) 来自 {}", file_name, file_size, peer);
                         // 自动接受文件请求
                         println!("✅ 自动接受文件传输");
+
+                        let safe_name = Path::new(&file_name)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
+                        let temp_path = args.save_dir.join(format!("{}_{}_{}.part", peer, transfer_id, safe_name));
+                        let final_path = args.save_dir.join(&file_name);
+                        if let Some(parent) = final_path.parent() {
+                            fs::create_dir_all(parent).await?;
+                        }
+                        let file = fs::OpenOptions::new()
+                            .create(true)
+                            .write(true)
+                            .truncate(true)
+                            .open(&temp_path)
+                            .await?;
+
+                        incoming_files.insert(
+                            (peer, transfer_id),
+                            IncomingFile {
+                                file,
+                                temp_path,
+                                final_path,
+                                original_file_name: file_name.clone(),
+                                total_size: file_size,
+                            },
+                        );
                     }
                     AppEvent::FileTransferStarted { peer, file_name, transfer_id } => {
                         println!("📁 文件传输开始: {} -> {} [ID: {}]", peer, file_name, transfer_id);
@@ -117,28 +153,29 @@ async fn main() -> anyhow::Result<()> {
                             println!("📊 [{}] {}: [{}] {}/{}", transfer_id, peer, bar, received, total);
                         }
                     }
-                    AppEvent::FileChunkReceived { peer: _, transfer_id, offset, data, is_last } => {
+                    AppEvent::FileChunkReceived { peer, transfer_id, offset, data, is_last } => {
                         if args.verbose {
                             println!("📦 接收数据块 [{}] offset={} size={} is_last={}",
                                 transfer_id, offset, data.len(), is_last);
                         }
-                        // 存储数据块（实际应用中可能需要更复杂的组装逻辑）
-                    }
-                    AppEvent::FileReceived { peer: _, file_name, data } => {
-                        let transfer_id = received_files.len() as u64 + 1;
-                        received_files.insert(transfer_id, (file_name.clone(), data.clone()));
 
-                        // 自动保存文件
-                        let save_path = args.save_dir.join(&file_name);
-                        match fs::write(&save_path, &data).await {
-                            Ok(_) => {
-                                println!("💾 文件已自动保存: {} -> {} ({} bytes)",
-                                    file_name, save_path.display(), data.len());
+                        if let Some(incoming) = incoming_files.get_mut(&(peer, transfer_id)) {
+                            incoming.file.seek(std::io::SeekFrom::Start(offset)).await?;
+                            incoming.file.write_all(&data).await?;
+                            if is_last {
+                                incoming.file.flush().await?;
                             }
-                            Err(e) => {
-                                println!("❌ 文件保存失败: {} - {}", save_path.display(), e);
-                                println!("💡 可以使用 /save {} <filename> 手动保存", transfer_id);
-                            }
+                        } else {
+                            println!("⚠️ 未找到接收文件记录: transfer_id={} peer={}", transfer_id, peer);
+                        }
+                    }
+                    AppEvent::FileReceived { peer, transfer_id, file_name: _, data: _ } => {
+                        if let Some(incoming) = incoming_files.remove(&(peer, transfer_id)) {
+                            fs::rename(&incoming.temp_path, &incoming.final_path).await?;
+                            println!("💾 文件已接收并保存: {} -> {} ({} bytes)",
+                                incoming.original_file_name, incoming.final_path.display(), incoming.total_size);
+                        } else {
+                            println!("⚠️ 接收完成但未找到临时文件记录: transfer_id={} peer={}", transfer_id, peer);
                         }
                     }
                     AppEvent::FileSent { peer, transfer_id } => {
@@ -148,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             Ok(Some(line)) = stdin.next_line() => {
-                if let Err(e) = handle_input(line, &cmd_tx, &received_files, &args.save_dir).await {
+                if let Err(e) = handle_input(line, &cmd_tx, &mut next_transfer_id).await {
                     println!("❌ 命令处理错误: {}", e);
                 }
             }
@@ -159,8 +196,7 @@ async fn main() -> anyhow::Result<()> {
 async fn handle_input(
     line: String,
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    received_files: &HashMap<u64, (String, Vec<u8>)>,
-    save_dir: &PathBuf,
+    next_transfer_id: &mut u64,
 ) -> anyhow::Result<()> {
     let line = line.trim();
     if line.is_empty() {
@@ -178,30 +214,6 @@ async fn handle_input(
         // 这里可以添加获取已连接节点列表的逻辑
         // 目前暂时显示帮助信息
         println!("📋 已连接节点列表功能待实现");
-        return Ok(());
-    }
-
-    // 手动保存文件
-    if line.starts_with("/save ") {
-        let mut parts = line.splitn(3, ' ');
-        parts.next(); // 跳过 /save
-        let transfer_id_str = parts.next().ok_or_else(|| anyhow::anyhow!("缺少传输ID"))?;
-        let filename = parts.next().unwrap_or("unknown_file");
-
-        let transfer_id: u64 = transfer_id_str.parse()?;
-
-        if let Some((original_name, data)) = received_files.get(&transfer_id) {
-            let save_path = save_dir.join(filename);
-            fs::write(&save_path, data).await?;
-            println!("💾 文件已保存: {} -> {} ({} bytes)",
-                original_name, save_path.display(), data.len());
-        } else {
-            println!("❌ 未找到传输ID: {}", transfer_id);
-            println!("💡 可用的传输ID: {}", received_files.keys()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>()
-                .join(", "));
-        }
         return Ok(());
     }
 
@@ -236,11 +248,40 @@ async fn handle_input(
             return Ok(());
         }
 
-        cmd_tx.send(Command::SendFile {
+        let data = fs::read(&path).await?;
+        let file_name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let file_size = data.len() as u64;
+        let transfer_id = *next_transfer_id;
+        *next_transfer_id += 1;
+
+        cmd_tx.send(Command::SendFileRequest {
             peer: peer_id,
-            path,
+            transfer_id,
+            file_name: file_name.clone(),
+            file_size,
         })?;
-        println!("📤 开始发送文件到: {}", peer_id);
+
+        let chunk_size: usize = 256 * 1024;
+        let mut offset: u64 = 0;
+        while (offset as usize) < data.len() {
+            let end = std::cmp::min(offset as usize + chunk_size, data.len());
+            let chunk = data[offset as usize..end].to_vec();
+            let is_last = end == data.len();
+            cmd_tx.send(Command::SendFileChunk {
+                transfer_id,
+                peer: peer_id,
+                offset,
+                data: chunk,
+                is_last,
+            })?;
+            offset = end as u64;
+        }
+
+        println!("📤 开始发送文件到: {} ({} bytes, transfer_id={})", peer_id, file_size, transfer_id);
         return Ok(());
     }
 

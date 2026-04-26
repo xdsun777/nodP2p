@@ -170,6 +170,14 @@ pub async fn start_swarm(
                                                         .request_response
                                                         .send_response(channel, ());
                                                     let _ = event_tx.send(
+                                                        AppEvent::FileRequestReceived {
+                                                            peer,
+                                                            transfer_id,
+                                                            file_name: file_name.clone(),
+                                                            file_size,
+                                                        }
+                                                    );
+                                                    let _ = event_tx.send(
                                                         AppEvent::FileTransferStarted {
                                                             peer,
                                                             transfer_id,
@@ -219,6 +227,7 @@ pub async fn start_swarm(
                                                                 let _ = event_tx.send(
                                                                     AppEvent::FileReceived {
                                                                         peer,
+                                                                        transfer_id,
                                                                         file_name: receiver.file_name.clone(),
                                                                         data: receiver.data.clone(),
                                                                     }
@@ -354,6 +363,23 @@ pub async fn start_swarm(
                                 }
                                 Err(e) => println!("无法读取文件: {}", e),
                             }
+                        }
+                        Command::SendFileRequest { peer, transfer_id, file_name, file_size } => {
+                            if !peers.contains(&peer) {
+                                println!("目标节点未连接: {}", peer);
+                                continue;
+                            }
+                            let req = PrivateMessage::FileRequest {
+                                transfer_id,
+                                file_name: file_name.clone(),
+                                file_size,
+                            };
+                            swarm.behaviour_mut().request_response.send_request(&peer, req);
+                            let _ = event_tx.send(AppEvent::FileTransferStarted {
+                                peer,
+                                transfer_id,
+                                file_name,
+                            });
                         }
                         Command::SendFileChunk { transfer_id, peer, offset, data, is_last } => {
                             if !peers.contains(&peer) {

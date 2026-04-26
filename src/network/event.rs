@@ -76,6 +76,8 @@ pub enum AppEvent {
     FileReceived { 
         /// 发送者节点ID
         peer: PeerId, 
+        /// 传输ID
+        transfer_id: u64,
         /// 文件名
         file_name: String, 
         /// 完整文件数据（用于传递给前端）
